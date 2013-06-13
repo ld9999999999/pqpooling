@@ -1,4 +1,42 @@
-# pq - A pure Go postgres driver for Go's database/sql package
+# pq - A pure Go postgres driver for Go's database/sql package (with hard-limit connection pooling support)
+
+This is a fork of lib/pq with driver level connection pooling. The following
+additions have been implemented:
+
+**Max Connections**
+
+This limits the number of concurrent connections to the server.
+
+	environment variable: PGMAXCONS=10
+	connection string: maxcons=10
+
+**Persistence**
+
+This makes connections to the database persistent and never disconnect
+(unless a connection error arises). maxcons must be defined for this to work.
+
+	environment variable: PGPERSIST=true
+	connection string: persist=true
+
+**Use**
+
+If maxcons is defind, then you must tell `database/sql` not to do any pooling
+with `db.SetMaxIdleConns(0)` immediately after opening the database
+successfully. You must also make sure that you perform database `Close()`
+only once otherwise it'll hang the connection pool up (the pooling uses
+semaphores based on the `Open()` and `Close()`).
+
+	func main() {
+		db, err := sql.Open("postgres", "user=pqgotest dbname=pqgotest sslmode=verify-full maxcons=10 persist=true")
+
+		//...
+
+		db.SetMaxIdleConns(0)
+
+		//...
+	}
+
+----- Everything below is from the original lib/pq -----
 
 ## Install
 

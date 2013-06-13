@@ -10,11 +10,11 @@ import (
 // ParseURL converts url to a connection string for driver.Open.
 // Example:
 //
-//	"postgres://bob:secret@1.2.3.4:5432/mydb?sslmode=verify-full"
+//	"postgres://bob:secret@1.2.3.4:5432/mydb?sslmode=verify-full&maxcons=10&persist=true"
 //
 // converts to:
 //
-//	"user=bob password=secret host=1.2.3.4 port=5432 dbname=mydb sslmode=verify-full"
+//	"user=bob password=secret host=1.2.3.4 port=5432 dbname=mydb sslmode=verify-full maxcons=10 persist=true"
 //
 // A minimal example:
 //

@@ -17,6 +17,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 var (
@@ -38,7 +39,23 @@ type conn struct {
 	c     net.Conn
 	buf   *bufio.Reader
 	namei int
+	pool  *connPoolItem
+	err   error
 }
+
+type connPoolItem struct {
+	conns int
+	free  []*conn
+	mu sync.Mutex
+	sem   chan int
+
+	maxcons int
+	persist bool // if not persistent, then connection is droped on Close()
+}
+
+// The pool of all databases; one pool item per unique database connection string.
+var connPool map[string] *connPoolItem
+var connPoolMtx sync.Mutex
 
 func Open(name string) (_ driver.Conn, err error) {
 	defer errRecover(&err)
@@ -60,6 +77,37 @@ func Open(name string) (_ driver.Conn, err error) {
 
 	parseOpts(name, o)
 
+	// Unique connection name for pool
+	connName := o.Get("host") + ":" + o.Get("port") + "/" + o.Get("dbname")
+	connPoolMtx.Lock()
+	doInit := false
+	if connPool == nil {
+		connPool = make(map[string] *connPoolItem)
+		doInit = true
+		connPoolMtx.Unlock()
+	} else {
+		pi, ok := connPool[connName]
+		connPoolMtx.Unlock()
+		if ok {
+			if pi.maxcons > 0 {
+				pi.sem <- 1
+				if pi.persist {
+					pi.mu.Lock()
+					if len(pi.free) > 0 {
+						conn := pi.free[len(pi.free)-1]
+						pi.free = pi.free[:len(pi.free)-1]
+						pi.mu.Unlock()
+						return conn, nil
+					} else if pi.conns > pi.maxcons {
+						// Semaphore should've limited number of connections to maxcons
+						panic("Semaphore error. Maximum connections reached.")
+					}
+					pi.mu.Unlock()
+				}
+			}
+		}
+	}
+
 	// If a user is not provided by any other means, the last
 	// resort is to use the current operating system provided user
 	// name.
@@ -77,10 +125,46 @@ func Open(name string) (_ driver.Conn, err error) {
 		return nil, err
 	}
 
+	smaxconns := o.Get("maxcons")
+	var maxcn int
+	if smaxconns == "" {
+		maxcn = 0
+	} else {
+		maxcn, _ = strconv.Atoi(smaxconns)
+	}
+
+	spersist := o.Get("persist")
+	var persist bool = spersist == "true" || spersist == "yes"
+
 	cn := &conn{c: c}
 	cn.ssl(o)
 	cn.buf = bufio.NewReader(cn.c)
 	cn.startup(o)
+
+	// Connection is ok to use so add to pool if persistent
+	connPoolMtx.Lock()
+	pi, ok := connPool[connName]
+	if !ok {
+		pi = &connPoolItem {
+			conns: 0,
+			free: make([]*conn, 0),
+			sem: make(chan int, maxcn),
+			maxcons: maxcn,
+			persist: persist,
+		}
+		connPool[connName] = pi
+	}
+	connPoolMtx.Unlock()
+
+	cn.pool = pi
+	if maxcn > 0 {
+		pi.mu.Lock()
+		pi.conns++
+		pi.mu.Unlock()
+		if doInit {
+			pi.sem <- 1
+		}
+	}
 	return cn, nil
 }
 
@@ -147,7 +231,10 @@ func (cn *conn) gname() string {
 }
 
 func (cn *conn) simpleQuery(q string) (res driver.Result, err error) {
-	defer errRecover(&err)
+	defer func() {
+		errRecover(&err)
+		cn.err = err
+	}()
 
 	b := newWriteBuf('Q')
 	b.string(q)
@@ -173,7 +260,10 @@ func (cn *conn) simpleQuery(q string) (res driver.Result, err error) {
 }
 
 func (cn *conn) prepareTo(q, stmtName string) (_ driver.Stmt, err error) {
-	defer errRecover(&err)
+	defer func() {
+		errRecover(&err)
+		cn.err = err
+	}()
 
 	st := &stmt{cn: cn, name: stmtName, query: q}
 
@@ -233,15 +323,41 @@ func (cn *conn) Prepare(q string) (driver.Stmt, error) {
 }
 
 func (cn *conn) Close() (err error) {
-	defer errRecover(&err)
-	cn.send(newWriteBuf('X'))
+	defer func() {
+		errRecover(&err)
+		cn.err = err
+	}()
 
-	return cn.c.Close()
+	// For persistent connection, do not close it; put it back into the free list
+	// An error condition on the connection will Close it outright.
+	if cn.err == nil && cn.pool.persist && cn.pool.maxcons > 0 {
+		cn.pool.mu.Lock()
+		cn.pool.free = append(cn.pool.free, cn)
+		cn.pool.mu.Unlock()
+
+		<-cn.pool.sem
+		return nil
+	}
+
+	if cn.pool.maxcons > 0 {
+		cn.pool.mu.Lock()
+		cn.pool.conns--
+		cn.pool.mu.Unlock()
+		<-cn.pool.sem
+	}
+
+	cn.send(newWriteBuf('X'))
+	err = cn.c.Close()
+
+	return err
 }
 
 // Implement the optional "Execer" interface for one-shot queries
 func (cn *conn) Exec(query string, args []driver.Value) (_ driver.Result, err error) {
-	defer errRecover(&err)
+	defer func() {
+		errRecover(&err)
+		cn.err = err
+	}()
 
 	// Check to see if we can use the "simpleQuery" interface, which is
 	// *much* faster than going through prepare/exec
@@ -677,6 +793,10 @@ func parseEnviron(env []string) (out map[string]string) {
 			accrue("client_encoding")
 			// skip PGDATESTYLE, PGTZ, PGGEQO, PGSYSCONFDIR,
 			// PGLOCALEDIR
+		case "PGMAXCONS":
+			accrue("maxcons")
+		case "PGPERSIST":
+			accrue("persist")
 		}
 	}
 
