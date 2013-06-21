@@ -58,7 +58,14 @@ var connPool map[string] *connPoolItem
 var connPoolMtx sync.Mutex
 
 func Open(name string) (_ driver.Conn, err error) {
-	defer errRecover(&err)
+	var pi *connPoolItem
+
+	defer func() {
+		errRecover(&err)
+		if err != nil && pi != nil {
+			<-pi.sem
+		}
+	}()
 	defer errRecoverWithPGReason(&err)
 
 	o := make(Values)
@@ -77,19 +84,42 @@ func Open(name string) (_ driver.Conn, err error) {
 
 	parseOpts(name, o)
 
+	smaxconns := o.Get("maxcons")
+	maxcn := int(0)
+	if smaxconns != "" {
+		if maxcn, err = strconv.Atoi(smaxconns); err != nil {
+			return nil, errors.New("Invalid maxcons")
+		}
+	}
+
+	spersist := o.Get("persist")
+	var persist bool = spersist == "true" || spersist == "yes"
+
 	// Unique connection name for pool
 	connName := o.Get("host") + ":" + o.Get("port") + "/" + o.Get("dbname")
-	connPoolMtx.Lock()
-	doInit := false
-	if connPool == nil {
-		connPool = make(map[string] *connPoolItem)
-		doInit = true
-		connPoolMtx.Unlock()
-	} else {
-		pi, ok := connPool[connName]
-		connPoolMtx.Unlock()
-		if ok {
-			if pi.maxcons > 0 {
+
+	if maxcn > 0 {
+		connPoolMtx.Lock()
+		if connPool == nil {
+			connPool = make(map[string] *connPoolItem)
+
+			pi = &connPoolItem {
+				conns: 0,
+				free: make([]*conn, 0),
+				sem: make(chan int, maxcn),
+				maxcons: maxcn,
+				persist: persist,
+			}
+
+			pi.sem <- 1
+
+			connPool[connName] = pi
+
+			connPoolMtx.Unlock()
+		} else {
+			pi, _ = connPool[connName]
+			connPoolMtx.Unlock()
+			if pi != nil {
 				pi.sem <- 1
 				if pi.persist {
 					pi.mu.Lock()
@@ -114,6 +144,9 @@ func Open(name string) (_ driver.Conn, err error) {
 	if o.Get("user") == "" {
 		u, err := userCurrent()
 		if err != nil {
+			if pi != nil {
+				<-pi.sem
+			}
 			return nil, err
 		} else {
 			o.Set("user", u)
@@ -122,48 +155,22 @@ func Open(name string) (_ driver.Conn, err error) {
 
 	c, err := net.Dial(network(o))
 	if err != nil {
+		if pi != nil {
+			<-pi.sem
+		}
 		return nil, err
 	}
-
-	smaxconns := o.Get("maxcons")
-	var maxcn int
-	if smaxconns == "" {
-		maxcn = 0
-	} else {
-		maxcn, _ = strconv.Atoi(smaxconns)
-	}
-
-	spersist := o.Get("persist")
-	var persist bool = spersist == "true" || spersist == "yes"
 
 	cn := &conn{c: c}
 	cn.ssl(o)
 	cn.buf = bufio.NewReader(cn.c)
 	cn.startup(o)
 
-	// Connection is ok to use so add to pool if persistent
-	connPoolMtx.Lock()
-	pi, ok := connPool[connName]
-	if !ok {
-		pi = &connPoolItem {
-			conns: 0,
-			free: make([]*conn, 0),
-			sem: make(chan int, maxcn),
-			maxcons: maxcn,
-			persist: persist,
-		}
-		connPool[connName] = pi
-	}
-	connPoolMtx.Unlock()
-
-	cn.pool = pi
 	if maxcn > 0 {
+		cn.pool = pi
 		pi.mu.Lock()
 		pi.conns++
 		pi.mu.Unlock()
-		if doInit {
-			pi.sem <- 1
-		}
 	}
 	return cn, nil
 }
@@ -330,16 +337,16 @@ func (cn *conn) Close() (err error) {
 
 	// For persistent connection, do not close it; put it back into the free list
 	// An error condition on the connection will Close it outright.
-	if cn.err == nil && cn.pool.persist && cn.pool.maxcons > 0 {
-		cn.pool.mu.Lock()
-		cn.pool.free = append(cn.pool.free, cn)
-		cn.pool.mu.Unlock()
+	if cn.pool != nil && cn.pool.maxcons > 0 {
+		if cn.err == nil && cn.pool.persist {
+			cn.pool.mu.Lock()
+			cn.pool.free = append(cn.pool.free, cn)
+			cn.pool.mu.Unlock()
 
-		<-cn.pool.sem
-		return nil
-	}
+			<-cn.pool.sem
+			return nil
+		}
 
-	if cn.pool.maxcons > 0 {
 		cn.pool.mu.Lock()
 		cn.pool.conns--
 		cn.pool.mu.Unlock()

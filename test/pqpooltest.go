@@ -10,7 +10,7 @@ package main
 */
 
 import (
-	_ "github.com/lib/pq"
+	_ "github.com/ld9999999999/pqpooling"
 	"database/sql"
 	"fmt"
 	"time"
