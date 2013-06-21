@@ -33,6 +33,7 @@ func (d *drv) Open(name string) (driver.Conn, error) {
 
 func init() {
 	sql.Register("postgres", &drv{})
+	connPool = make(map[string] *connPoolItem)
 }
 
 type conn struct {
@@ -100,9 +101,8 @@ func Open(name string) (_ driver.Conn, err error) {
 
 	if maxcn > 0 {
 		connPoolMtx.Lock()
-		if connPool == nil {
-			connPool = make(map[string] *connPoolItem)
-
+		pi, _ = connPool[connName]
+		if pi == nil {
 			pi = &connPoolItem {
 				conns: 0,
 				free: make([]*conn, 0),
@@ -117,23 +117,20 @@ func Open(name string) (_ driver.Conn, err error) {
 
 			connPoolMtx.Unlock()
 		} else {
-			pi, _ = connPool[connName]
 			connPoolMtx.Unlock()
-			if pi != nil {
-				pi.sem <- 1
-				if pi.persist {
-					pi.mu.Lock()
-					if len(pi.free) > 0 {
-						conn := pi.free[len(pi.free)-1]
-						pi.free = pi.free[:len(pi.free)-1]
-						pi.mu.Unlock()
-						return conn, nil
-					} else if pi.conns > pi.maxcons {
-						// Semaphore should've limited number of connections to maxcons
-						panic("Semaphore error. Maximum connections reached.")
-					}
+			pi.sem <- 1
+			if pi.persist {
+				pi.mu.Lock()
+				if len(pi.free) > 0 {
+					conn := pi.free[len(pi.free)-1]
+					pi.free = pi.free[:len(pi.free)-1]
 					pi.mu.Unlock()
+					return conn, nil
+				} else if pi.conns > pi.maxcons {
+					// Semaphore should've limited number of connections to maxcons
+					panic("Semaphore error. Maximum connections reached.")
 				}
+				pi.mu.Unlock()
 			}
 		}
 	}
