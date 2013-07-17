@@ -144,6 +144,7 @@ func Open(name string) (_ driver.Conn, err error) {
 		if err != nil {
 			if pi != nil {
 				<-pi.sem
+				pi = nil
 			}
 			return nil, err
 		} else {
@@ -155,6 +156,7 @@ func Open(name string) (_ driver.Conn, err error) {
 	if err != nil {
 		if pi != nil {
 			<-pi.sem
+			pi = nil
 		}
 		return nil, err
 	}
