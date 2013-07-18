@@ -142,10 +142,6 @@ func Open(name string) (_ driver.Conn, err error) {
 	if o.Get("user") == "" {
 		u, err := userCurrent()
 		if err != nil {
-			if pi != nil {
-				<-pi.sem
-				pi = nil
-			}
 			return nil, err
 		} else {
 			o.Set("user", u)
@@ -154,10 +150,6 @@ func Open(name string) (_ driver.Conn, err error) {
 
 	c, err := net.Dial(network(o))
 	if err != nil {
-		if pi != nil {
-			<-pi.sem
-			pi = nil
-		}
 		return nil, err
 	}
 
