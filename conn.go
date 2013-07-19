@@ -185,8 +185,7 @@ func (vs Values) Set(k, v string) {
 }
 
 func (vs Values) Get(k string) (v string) {
-	v, _ = vs[k]
-	return
+	return vs[k]
 }
 
 func parseOpts(name string, o Values) {
@@ -280,10 +279,10 @@ func (cn *conn) prepareTo(q, stmtName string) (_ driver.Stmt, err error) {
 		switch t {
 		case '1', '2', 'N':
 		case 't':
-			st.nparams = int(r.int16())
-			st.paramTyps = make([]oid.Oid, st.nparams, st.nparams)
+			nparams := int(r.int16())
+			st.paramTyps = make([]oid.Oid, nparams)
 
-			for i := 0; i < st.nparams; i += 1 {
+			for i := range st.paramTyps {
 				st.paramTyps[i] = r.oid()
 			}
 		case 'T':
@@ -515,7 +514,6 @@ type stmt struct {
 	name      string
 	query     string
 	cols      []string
-	nparams   int
 	rowTyps   []oid.Oid
 	paramTyps []oid.Oid
 	closed    bool
@@ -636,23 +634,13 @@ func (st *stmt) exec(v []driver.Value) {
 }
 
 func (st *stmt) NumInput() int {
-	return st.nparams
-}
-
-type result int64
-
-func (i result) RowsAffected() (int64, error) {
-	return int64(i), nil
-}
-
-func (i result) LastInsertId() (int64, error) {
-	return 0, ErrNotSupported
+	return len(st.paramTyps)
 }
 
 func parseComplete(s string) driver.Result {
 	parts := strings.Split(s, " ")
 	n, _ := strconv.ParseInt(parts[len(parts)-1], 10, 64)
-	return result(n)
+	return driver.RowsAffected(n)
 }
 
 type rows struct {
@@ -701,7 +689,10 @@ func (rs *rows) Next(dest []driver.Value) (err error) {
 			return io.EOF
 		case 'D':
 			n := r.int16()
-			for i := 0; i < len(dest) && i < n; i++ {
+			if n < len(dest) {
+				dest = dest[:n]
+			}
+			for i := range dest {
 				l := r.int32()
 				if l == -1 {
 					dest[i] = nil

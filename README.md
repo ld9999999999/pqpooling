@@ -38,6 +38,8 @@ semaphores based on the `Open()` and `Close()`).
 
 ----- Everything below is from the original lib/pq -----
 
+[![Build Status](https://travis-ci.org/lib/pq.png?branch=master)](https://travis-ci.org/lib/pq)
+
 ## Install
 
 	go get github.com/lib/pq
